@@ -1,6 +1,7 @@
-use actix_web::{ App, get, HttpResponse, HttpServer, main, post, Responder, guard };
-use actix_web::web::{ Form, Json, resource, post as web_post };
+use actix_web::{ App, get, HttpResponse, HttpServer, main, post, Responder, guard, rt };
+use actix_web::web::{ Data, Form, Json, Path, resource, post as web_post };
 use serde::{ Deserialize, Serialize };
+use std::sync::Mutex;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Subscriber {
@@ -70,13 +71,57 @@ async fn subscribe_with_json(subscriber: Json<Subscriber>) -> HttpResponse {
         .json(subscriber.into_inner())
 }
 
+#[derive(Default)]
+struct Counters {
+    to_celcius: usize,
+    to_fahrenheit: usize,
+}
+
+#[derive(Default)]
+struct UsageStats {
+    counters: Mutex<Counters>,
+}
+
+impl UsageStats {
+    fn new() -> Self {
+        UsageStats::default()
+    }
+}
+
+#[get("/to-celcius/{fahrenheit}")]
+async fn to_celcius(fahrenheit: Path<f64>, data: Data<UsageStats>) -> HttpResponse {
+    rt::spawn(async move {
+        let mut counters = data.counters.lock().unwrap();
+        counters.to_celcius += 1;
+    });
+
+    let celsius: f64 = (fahrenheit.into_inner() - 32.0) * 5.0 / 9.0;
+    HttpResponse::Ok().json(celsius)
+}
+
+#[get("/to-fahrenheit/{celsius}")]
+async fn to_fahrenheit(celsius: Path<f64>, data: Data<UsageStats>) -> HttpResponse {
+    rt::spawn(async move {
+        let mut counters = data.counters.lock().unwrap();
+        counters.to_fahrenheit += 1;
+    });
+
+    let fahrenheit: f64 = (celsius.into_inner() * 9.0 / 5.0) + 32.0;
+    HttpResponse::Ok().json(fahrenheit)
+}
+
 #[main]
 async fn main() -> std::io::Result<()> {
-    HttpServer::new(|| {
+    let usage_stats = Data::new(UsageStats::new());
+    
+    HttpServer::new(move || {
         App::new()
+            .app_data(usage_stats.clone())
             .service(health_check)
             .service(index)
             .service(subscribe)
+            .service(to_celcius)
+            .service(to_fahrenheit)
             .service(
                 resource("/submit")
                     .guard(guard::Header("Content-Type", "application/json"))
